@@ -549,6 +549,18 @@ class D64 {
     }
 
     /**
+     * A directory LINE with no file behind it: a closed DEL entry of 0 blocks, the scene's way of
+     * putting text in a listing. It points at 18/0 (the BAM, always allocated), so a VALIDATE that
+     * follows it frees nothing. getDirectory() skips it, as it skips every DEL.
+     */
+    writeLabel(text) {
+        if (!text || text.length > 16) throw new Error(`a directory label is 1-16 characters: '${text}'`);
+        const dirEntry = this._findEmptyDirectoryEntry();
+        if (!dirEntry) throw new Error('Directory is full');
+        this._writeDirectoryEntry(dirEntry, text, D64.FILE_TYPE_DEL | 0x80, D64.DIR_TRACK, 0, 0);
+    }
+
+    /**
      * Write a directory entry
      */
     _writeDirectoryEntry(dirLocation, fileName, fileType, startTrack, startSector, blocks) {

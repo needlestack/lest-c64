@@ -30353,7 +30353,7 @@ try {
   const run = buildAutorun(assemble, FB ? FB_NAME : QUOTE ? QUOTE_NAME : 'IRAY',
                            FB ? FASTBOOT_AT : QUOTE ? QUOTE_RUN : IRAY_ENTRY);
   const writeDisk = (ifb, drv) => {
-    const d = D64.createEmpty('IRAY', '01');
+    const d = D64.createEmpty('LEST', '01');   // the disk's name, the listing's first line (the working title IRAY until 2026-11-17)
     d.writeFile('IRUN', Buffer.from(run), D64.FILE_TYPE_PRG);     // FIRST, so LOAD"*",8,1 finds it
     if (FB) {
       d.writeFile(FB_NAME, Buffer.from(ifb.prg), D64.FILE_TYPE_PRG);
@@ -30373,6 +30373,11 @@ try {
     // boot's 58 KB. See krill/README-krill, "native interleave".
     for (const f of DISK) d.writeFile(f.name, prgOf(f.at, f.data), D64.FILE_TYPE_PRG, KRILL_IL);
     if (END) for (const e of [END.iend, END.itre]) d.writeFile(e.name, Buffer.from(e.prg), D64.FILE_TYPE_PRG, KRILL_IL);
+    // KRILL'S CREDIT, which his BSD licence asks of a binary release ("Loader by Krill" in the
+    // production or its documentation; see krill/README). A line of the disk's own directory, LAST, so
+    // LOAD"*",8,1 still finds IRUN first. The cartridge needs none: it holds no byte of Krill's code
+    // (its loader is cart-src.mjs's own, with Krill's calling convention only; checked 2026-11-17).
+    d.writeLabel('LOADER BY KRILL');
     return d;
   };
   let d;
