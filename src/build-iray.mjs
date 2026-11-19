@@ -21567,6 +21567,9 @@ ${shockDie('zk', { rnd: 'svRnd', q: 'svQ', n: 'svDY', snd: SVSND, v1: 0x10, keep
   base: null, enter: `  lda #$00
         sta svHit               ; svTick: hands off the border, it is ours now
         sta svBdOn
+        sta $d020               ; ...and BLACK for the death: the touch's zap left it whatever blue
+                                ;   it last flashed, and with svBdOn cleared svTick never put it back
+                                ;   (the user, 2026-11-18: "the border stay blue when the actual death kicks in")
         sta $d015               ; no sprites`,
   sndPre: `        lda #$01                ; the level's sound stands aside (zsOff)...
         sta zsOff
