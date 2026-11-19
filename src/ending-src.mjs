@@ -50,6 +50,13 @@ const T_END = 0x6c00;               // ITRE's file ends here; the rest is made a
 const MASK = 0x6c00;                // 8000, zeroed at start
 const DSP_SCR = 0x8c00;             // bank 2 + $0c00 ($9000-$9fff is the char ROM's shadow there)
 const DSP = 0xa000;                 // bank 2 + $2000
+// THE RAM AT $9000-$9FFF, the char ROM's shadow in bank 2 (plain RAM to the CPU), ITRE's run-time
+// scratch. ONE MAP, checked for overlaps in buildEnding: from 2026-11-15 to 11-19 the lights' timers
+// sat on the generative flute's phrase at $9400 (both "free above the dissolve's tables"), and every
+// frame the lights rewrote the notes the flute was about to play.
+const RAM_TB = 0x9000;              // the dissolve's tables (tPrep): $9000-$93ff
+const GEN_PHRASE = 0x9400, GEN_PMAX = 32;   // the generator's phrase: degrees, then frames, GEN_PMAX each
+const RAM_LIGHTS = GEN_PHRASE + 2 * GEN_PMAX; // each light's timer, then its state
 // SRC, MASK and DSP are all page aligned, so one byte offset is the same low byte in all three and
 // the high bytes differ by these constants
 const MASKD = (MASK - SRC) >> 8, DSPD = (DSP - SRC) >> 8;
@@ -329,7 +336,15 @@ ${G ? G.code : ''}`;
   if (TUNEF < 1 || TUNEF > 65535) throw new Error('tuneS: a 16-bit count of frames');
   // the dissolve's tables, made by tPrep in RAM nothing else uses: $9000-$9fff is the char ROM's
   // shadow for the VIC in bank 2, plain RAM to the CPU (DSP_SCR ends at $8fe7, DSP starts at $a000)
-  const TB = 0x9000, LO2 = TB, PBT = TB + 0x100, HI6 = TB + 0x200, SRCH = TB + 0x280, MSKH = TB + 0x300, DSPH = TB + 0x380;
+  const TB = RAM_TB, LO2 = TB, PBT = TB + 0x100, HI6 = TB + 0x200, SRCH = TB + 0x280, MSKH = TB + 0x300, DSPH = TB + 0x380;
+
+  // the $9000 map: no two users of it may overlap, and all of it lies below the display at DSP
+  const ram = [[TB, TB + 0x400, "the dissolve's tables"], ...(GEN ? [[GEN_PHRASE, GEN_PHRASE + 2 * GEN_PMAX, "the flute's phrase"]] : []),
+               [RAM_LIGHTS, RAM_LIGHTS + 2 * NL, "the lights' timers"]];
+  for (const [a0, a1, an] of ram) {
+    if (a0 < 0x9000 || a1 > 0xa000) throw new Error(`${an} (${hx(a0, 4)}-${hx(a1 - 1, 4)}) is outside $9000-$9fff`);
+    for (const [b0, b1, bn] of ram) if (an !== bn && a0 < b1 && b0 < a1) throw new Error(`${an} (${hx(a0, 4)}-${hx(a1 - 1, 4)}) overlaps ${bn} (${hx(b0, 4)}-${hx(b1 - 1, 4)})`);
+  }
 
   const tsrc = `
 seedlo  = $fb
@@ -387,8 +402,8 @@ brsh    = $5b               ;   ...and its decay: it loses 1/2^brsh of itself a 
 mt      = $5c               ;   scratch (and $5d)
 voffh   = $5e
 vdeep   = $5f               ;   this note's vibrato is twice as deep
-ltimer  = ${hx(TB + 0x400, 4)}             ; each light's frames to its next toggle, and its state: RUN-TIME
-lstate  = ${hx(TB + 0x400 + NL, 4)}             ;   only (li sets both), so they live past the dissolve's tables, not
+ltimer  = ${hx(RAM_LIGHTS, 4)}             ; each light's frames to its next toggle, and its state: RUN-TIME
+lstate  = ${hx(RAM_LIGHTS + NL, 4)}             ;   only (li sets both), so they live in the $9000 RAM (RAM_LIGHTS), not
                             ;   in the file's code page (2026-11-15: that page was full)
 dsteps  = $3e               ; the dissolve's pixels a frame
 dwait   = $3f               ; frames before it starts to speed up
@@ -1033,8 +1048,7 @@ sdone:`;
 
 // THE GENERATIVE FLUTE (ENDTUNE=gen; the music is described in end-tunes.mjs). Its CODE lives in IEND
 // after REBOOT, its TABLES in the quote charset's unused tail (the quote has 180 of 256 glyphs; codes
-// past it are never on screen), its phrase in RAM at $9400 (free in ITRE's bank 2, above the dissolve's
-// tables). ITRE's code page is nearly full. All of it is dead once fire is pressed -- REBOOT reloads
+// past it are never on screen), its phrase in RAM at GEN_PHRASE (ITRE's bank 2; see the $9000 map at the top). ITRE's code page is nearly full. All of it is dead once fire is pressed -- REBOOT reloads
 // the charset over the tables, and nothing calls the generator after that.
 // ITRE's player asks gGet for each event, and peeks gnN -- the event after it, made one ahead -- to
 // know whether a note follows (hard restart), a SLURRED note follows (no restart: bit 7), or a rest.
@@ -1044,7 +1058,7 @@ sdone:`;
 // opts: now (a TEST: skip the user's two opening phrases), gap = [base, mult]: a long silence is
 // base + mult * 0..255 frames (mult 1, 2 or 4)
 const genCode = ({ now = false, gap = [300, 4] } = {}) => {
-  const PDEG = 0x9400, PDUR = 0x9420, PMAX = 32;
+  const PDEG = GEN_PHRASE, PDUR = GEN_PHRASE + GEN_PMAX, PMAX = GEN_PMAX;
   const [LEN0, LEN1] = GEN_LEN;
   // the most a phrase can hold: a note short of LEN1, then the longest cell or a trill (8 + landing), then the end
   const worst = LEN1 - 1 + Math.max(...GEN_CELLS.map(c => c.length), 9) + 1;
