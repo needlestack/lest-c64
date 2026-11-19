@@ -39,8 +39,13 @@ for a b in aligned spell-aligned robin spell-robin trihp spell-tri-hp arptri spe
 L2="RSTEP=2 BEATLOOP=1 CLOOP=1"
 # (level 5: robin strikes every voice at row 160 and glides them all into row 240, so its switches may come
 # a row early or late -- and aligned, sharing its filter program, carries the same waits)
-env ${=ALIGNED} ${=LP} ${=L2} CLOOPE=1 CLOOPL=1 CSWEEP=b0,d0,16 CHORDS=$CA ${=G} $R/aligned2.sng >/dev/null
-env ${=ALIGNED} ${=LP} ${=L2} CLOOPE=1 CLOOPL=1 CSWEEP=b0,d0,16 BEATCYCLE=7,11,13 ROBIN=1 CHORDS=$CA ${=G} $R/robin2.sng >/dev/null
+# (2026-11-18, the user, by A/B in VICE at the game's 60 Hz: the cutoff down from b0-d0 to 60-80, every voice's
+# SUSTAIN halved for less distortion (BASSSR=69 PADSR=59: 12 and 11 of 15 -> 6 and 5; the same bytes), and in
+# robin the narrow pulse widened 180 -> 400: under the lower cutoff a $180 pulse lost most of its level, a
+# dropout rather than a change of colour)
+L5="CSWEEP=60,80,16 BASSSR=69 PADSR=59"
+env ${=ALIGNED} ${=LP} ${=L2} CLOOPE=1 CLOOPL=1 ${=L5} CHORDS=$CA ${=G} $R/aligned2.sng >/dev/null
+env ${=ALIGNED} ${=LP} ${=L2} CLOOPE=1 CLOOPL=1 ${=L5} BEATCYCLE=7,11,13 ROBIN=1 BEATPW=800,400 CHORDS=$CA ${=G} $R/robin2.sng >/dev/null
 env ${=ALIGNED} WAVES=t,t,t FILT=1 FTYPE=hp FRES=0 FMASK=7 FLO=08 FHI=48 FSTEP=2 FCYCLE=8 CLOOP=1 CHORDS=$CA ${=G} $R/trihp2.sng >/dev/null
 # (level 6's arp-tri round has no FADEIN: only a song's start plays it, and round 2 never starts the song)
 env ${=ALIGNED} ARPSAME=1 ARPT=15 ARPDIR=down ${=NZ} WAVES=p,p,t ${=LP} ${=L2} CSWEEP=90,b0,16 CHORDS=$CARP ${=G} $R/arptri2.sng >/dev/null
