@@ -20,12 +20,12 @@ Six questions, six tools:
 ## The ending: `endcheck.mjs`
 
 `node tools/endcheck.mjs` (2026-11-16) builds one test disk and cartridge (`ENDTEST=1`: level 1's exit
-is the last hole, `FALLNOW=64` falls through it, `ENDAUTO=30` presses fire after the dissolve) to
+is the last hole, `FALLNOW=64` falls through it, `ENDAUTO=120` presses fire 2 s after the flute's clock runs out) to
 `build/zz-end.*`, and runs it four times: disk and cart, NTSC and PAL. The disk runs time the end
 quote's hold (6 s on both machines); the cart runs check its skip (a press held from the start skips
 nothing, a fresh one does; the cart's hold is 11 s). Every run counts the tree's ticks through the
 whole dissolve (1 a frame on NTSC, 1.2 on PAL), checks that no frame is lost and no gust starts
-during it, and that the first gust comes about a second after it, then follows REBOOT to the game's
+during it, that the first gust comes 5 s after it and the flute's clock runs out 8 s after it (2026-11-19), then follows REBOOT to the game's
 entry with the PAL flag intact. (Until 2026-11-16 gusts ran during the dissolve, and one at its
 full-speed end overran frames: 2-8 of 387 lost on NTSC, 0-16 of 322 on PAL. The gusts now wait.) About 20-40 s; exit 1 on any failure.
 

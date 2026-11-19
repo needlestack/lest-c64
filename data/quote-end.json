@@ -2,7 +2,7 @@
  "note": "Boot quote: a 320x200 hi-res image as a charset plus a 40x25 map, merged to a glyph BUDGET so the title screen can share the charset -- see make-quote.mjs. glyphs are 8 bytes each, MSB left; screen is 1000 bytes of glyph index; ink is the C64 colour for colour RAM, background is black.",
  "src": "art/quote-end.png",
  "threshold": 0.36,
- "ink": 12,
+ "ink": 15,
  "glyphs": 180,
  "budget": 256,
  "fullGlyphs": 180,

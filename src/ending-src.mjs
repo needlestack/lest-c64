@@ -30,7 +30,7 @@
 // been drawn exactly once: no pixel twice, none left over, no bookkeeping.
 import { assemble } from './asm6502.mjs';
 import { renderNote } from './note-font.mjs';
-import { TUNE_ROW, TUNE_GAP, sidFreq, GEN_LOW, GEN_MODES, GEN_CELLS, GEN_LEN, GEN_ENDS, GEN_TRILL, GEN_TRILL_LAND, GEN_TRILL_IN, GEN_QUOTES, GEN_MOVES, GEN_HOMES, GEN_ENDINGS, GEN_OPEN, GEN_GLIDE_IN, GEN_BEND_IN, GEN_BEND_MIN, GEN_SLUR, GEN_SLUR_RUN, VIB_DEEP_IN } from './end-tunes.mjs';
+import { TUNE_ROW, TUNE_GAP, sidFreq, GEN_LOW, GEN_MODES, GEN_CELLS, GEN_LEN, GEN_ENDS, GEN_TRILL, GEN_TRILL_LAND, GEN_TRILL_IN, GEN_QUOTES, GEN_MOVES, GEN_HOMES, GEN_ENDINGS, GEN_OPEN, GEN_GLIDE_IN, GEN_BEND_IN, GEN_BEND_MIN, GEN_SLUR, GEN_SLUR_RUN, VIB_DEEP_IN, VIB_TURN, VIB_SWING } from './end-tunes.mjs';
 
 export const END_DST = 0xfe;        // lvlNxtT's "this hole is the end of the game" ($ff = no exit)
 export const IEND_NAME = 'IEND', ITRE_NAME = 'ITRE', NOTE_NAME = 'INOT';
@@ -91,12 +91,14 @@ if (1000 - NOTE_ROWS * 40 > 512 || 1000 - NOTE_ROWS * 40 < 256) throw new Error(
 // directly, and VICE's monitor can only feed the KERNAL's buffer, which nothing here reads.
 // sound (2026-11-10, the user: "the wind from level 4 without the hum ... after 20 or so seconds of the
 // final screen, there could be a song in the distance"): tune = parseTune()'s events, tuneS = seconds
-// after the cut before it first plays, breath = voice 3's noise pitch (high byte; 0 = no breath),
+// after the TREE IS WHOLE (the dissolve done) before it first plays, gustS the same for the first
+// gust (the user, 2026-11-19: gusts 5 s after the tree, the flute 3 s after that), breath = voice 3's noise pitch (high byte; 0 = no breath),
 // brSus its sustain. wind/gust/calm: see leafCode, and soundCode for the wind's filter steps.
-// ramp: the dissolve's ending, { at: frames at the base pace, cap: pixels a frame at the end }.
+// ramp: the dissolve's ending, { at: frames at the base pace, cap: pixels a frame at the end, climb:
+// pixels a frame more each frame }.
 export function buildEnding({ scene, quote, files, entry, krill, palF = null, holdS = 6, dissolveS = 8, autoF = 0, flute = null,
-                              tune = [], tuneS = 20, breath = 0x38, brSus = 1,
-                              genOpts = {}, grate = 384, gust = [5, 4], calm = 60, ramp = { at: 240, cap: 120 } }) {
+                              tune = [], tuneS = 8, gustS = 5, breath = 0x38, brSus = 1,
+                              genOpts = {}, grate = 384, gust = [5, 4], calm = 60, ramp = { at: 30, cap: 119, climb: 2 } }) {
   if (autoF > 255) throw new Error('autoF counts frames in one byte');
   if (!(holdS >= 1 && holdS <= 255 && Number.isInteger(holdS))) throw new Error('holdS: whole seconds, 1-255');
   const GEN = tune === 'gen';         // the generative flute (genCode), else a fixed tune's events
@@ -147,7 +149,7 @@ ${palF !== null ? `        lda ${hx(palF, 4)}           ; PAL OR NTSC (the game'
         sta $d418           ; silence
         sta $d020
         sta $d021
-        lda #${quote.ink}   ; the quote's ink, the same grey as the opening one
+        lda #${quote.ink}   ; the quote's ink: grey 3 since 2026-11-19 (the opening quote stays grey 2)
         jsr qInk
         lda #$00            ; VIC bank 3 -- written whole, upper bits 0: Krill owns $dd00's serial
         sta $dd00           ;   bits and asks that a bank switch never read-modify-write it
@@ -303,17 +305,27 @@ ${G ? G.code : ''}`;
   // ...and THE END COMES QUICKER (the user, 2026-11-10: "at the beginning I like the speed, but by the
   // time it's 2/3 done it feels like it should wrap up quicker"). A random dissolve's last third is the
   // slow-looking part: each frame fills a smaller share of what is still missing. So after ramp.at
-  // frames at STEPS the pace climbs one pixel a frame more each frame, to ramp.cap.
-  const RAMPAT = ramp.at, RAMPCAP = ramp.cap;
-  if (RAMPAT > 255 || RAMPCAP > 120 || RAMPCAP < STEPS) throw new Error('ramp: at <= 255 frames, STEPS <= cap <= 120');
-  const dsFrames = (() => { let f = 0, done = 0, s = STEPS; while (done < 32767) { done += s; f++; if (f > RAMPAT && s < RAMPCAP) s++; } return f; })();
+  // frames at STEPS the pace climbs ramp.climb pixels a frame more each frame, to ramp.cap.
+  // 2026-11-19 (the user: "start the speedup earlier and make it more pronounced ... about 4 seconds"):
+  // half a second at STEPS, then +2 a frame -- 4.87 s, from 6.45 (240 frames, then +1). 4 s cannot be
+  // had at this step's cost: the top pace from the first frame would still take 4.57 s.
+  const RAMPAT = ramp.at, RAMPCAP = ramp.cap, CLIMB = ramp.climb;
+  if (RAMPAT > 255 || RAMPCAP < STEPS || !(CLIMB >= 1 && CLIMB <= 3)) throw new Error('ramp: at <= 255 frames, STEPS <= cap, climb 1-3');
+  // the pace as dslv runs it (it adds while below the cap, so it can pass the cap by climb - 1): the
+  // frames it takes, and the highest pace it reaches -- which is what must fit a frame
+  const dsRun = (s, at, cap, inc) => { let f = 0, done = 0, top = s; while (done < 32767) { done += s; f++;
+    if (f > at && s < cap) { s += inc(); top = Math.max(top, s); } } return { f, top }; };
+  const NT = dsRun(STEPS, RAMPAT, RAMPCAP, () => CLIMB), dsFrames = NT.f;
+  if (NT.top > 120) throw new Error(`the dissolve reaches ${NT.top} pixels a frame; 120 is what fits an NTSC frame`);
   // PAL: the dissolve runs once a FRAME (two in a frame would not fit at the end of the climb), so
   // it gets the same curve in seconds: 6/5 the pixels a frame, 5/6 the frames before the climb, and
   // a climb of 1.5 a frame (alternating 1 and 2: the NTSC climb is 60 a second each second, 1.44 a PAL
   // frame each frame) to 6/5 the cap. dsl's step is ~95 cycles, and a PAL bitmap frame leaves ~18,600.
+  // (Since 2026-11-19 the climb is CLIMB, CLIMB+1 alternating: 2.5 a PAL frame for NTSC's 2.)
   const PSTEPS = Math.round(STEPS * 6 / 5), PRAMPAT = Math.round(RAMPAT * 5 / 6), PRAMPCAP = Math.round(RAMPCAP * 6 / 5);
-  if (PRAMPCAP > 146) throw new Error(`PAL dissolve cap ${PRAMPCAP} will not fit a PAL frame`);
-  const dsFramesPal = (() => { let f = 0, done = 0, s = PSTEPS; while (done < 32767) { done += s; f++; if (f > PRAMPAT && s < PRAMPCAP) s += 1 + (f - PRAMPAT - 1) % 2; } return f; })();
+  let pTog = 0;
+  const PA = dsRun(PSTEPS, PRAMPAT, PRAMPCAP, () => CLIMB + (pTog++ & 1)), dsFramesPal = PA.f;
+  if (PA.top > 146) throw new Error(`the PAL dissolve reaches ${PA.top} pixels a frame; 146 is what fits a PAL frame`);
   if (Math.abs(dsFramesPal / 50 - dsFrames / 60) > 0.1) throw new Error(`PAL dissolve ${(dsFramesPal / 50).toFixed(2)} s against NTSC ${(dsFrames / 60).toFixed(2)} s`);
   // TURNS PER FRAME inside a gust, in 256ths: 171 was 2 every 3 frames, 128 before the user's "a bit
   // more wind in the leaves -- not a lot, just a little more"; 384 (1.5 a frame) since 2026-11-10 ("I
@@ -332,8 +344,13 @@ ${G ? G.code : ''}`;
     for (let f = e.rows * TUNE_ROW; f > 0; f -= 255) ev.push([e.semi === null ? 0 : e.semi - LOW + 1, Math.min(255, f)]);
   if (ev.length > 255) throw new Error(`the end tune has ${ev.length} events; its index is a byte`);
   const freqs = [0, ...Array.from({ length: HIGH - LOW + 1 }, (_, k) => sidFreq(LOW + k))];
-  const TUNEF = Math.round(tuneS * 60);
+  // ONE CLOCK AFTER THE TREE IS WHOLE (mdlo/mdhi, in ticks): it starts when the dissolve is done and
+  // counts down to the tune. The first gust waits until it has GATEF left -- gustS after the tree
+  // (2026-11-19; until then the tune counted from the cut, 20 s then 10, and the first gust came 1 s
+  // after the dissolve). It runs with or without the flute, so the gusts always come.
+  const TUNEF = Math.round(tuneS * 60), GATEF = TUNEF - Math.round(gustS * 60);
   if (TUNEF < 1 || TUNEF > 65535) throw new Error('tuneS: a 16-bit count of frames');
+  if (!(GATEF >= 0)) throw new Error('gustS: the first gust comes no later than the tune (the clock that times it ends there)');
   // the dissolve's tables, made by tPrep in RAM nothing else uses: $9000-$9fff is the char ROM's
   // shadow for the VIC in bank 2, plain RAM to the CPU (DSP_SCR ends at $8fe7, DSP starts at $a000)
   const TB = RAM_TB, LO2 = TB, PBT = TB + 0x100, HI6 = TB + 0x200, SRCH = TB + 0x280, MSKH = TB + 0x300, DSPH = TB + 0x380;
@@ -386,7 +403,7 @@ gturns  = $30               ; turns left this frame
 wtk     = $31               ; the wind: frames to its next filter step
 wcut    = $32               ;   its cutoff
 wst     = $33               ;   the silent attack's countdown (0 = the noise is on)
-mdlo    = $34               ; the tune: frames before it first plays
+mdlo    = $34               ; THE CLOCK AFTER THE TREE: ticks before the tune first plays (0 from then on)
 mdhi    = $35
 mptr    = $36               ;   the next event
 mdur    = $37               ;   frames left of this one
@@ -414,7 +431,7 @@ dwait   = $3f               ; frames before it starts to speed up
 tFl:    !byte 1             ; 0: no flute was taken, so no tune (IEND writes it; 1 plays, as an ENDBOOT test does)
 tPal:   !byte 0             ; 1: a PAL machine (IEND writes the game's palF here before tPrep)
 t5:     !byte 5             ; PAL: frames to the next double tick
-dcap:   !byte ${RAMPCAP}    ; the dissolve's top pace, and on PAL its climb alternates +1/+2 (dTog)
+dcap:   !byte ${RAMPCAP}    ; the dissolve's top pace, and on PAL its climb alternates (dTog)
 dTog:   !byte 0
 
 ; ---- tPrep: everything that can be made ready while the quote is still up ----
@@ -452,10 +469,10 @@ cp:     lda ${hx(SRC_SCR, 4)},x     ;   24 -- harmless: past the end of the data
         sta krel
         lda #${autoF & 255}
         sta kauto
-        lda #$00            ; no gust yet: the first comes a second after the dissolve (gc1)
+        lda #$00            ; no gust yet: the first comes gustS after the dissolve (gc1)
         sta gact
         sta gacc
-        lda #$3c
+        lda #$01            ; the first gust: as soon as the clock lets it (gc1)
         sta gcalm
         lda #${STEPS}       ; the dissolve's pace, and when it starts to climb
         sta dsteps
@@ -469,7 +486,7 @@ cp:     lda ${hx(SRC_SCR, 4)},x     ;   24 -- harmless: past the end of the data
         sta dwait
         lda #${PRAMPCAP}
         sta dcap
-        lda #$03            ; the climb's step toggles 1 <-> 2
+        lda #${(CLIMB ^ (CLIMB + 1))}            ; the climb's step toggles ${CLIMB} <-> ${CLIMB + 1}
         sta dTog
 tpN:
         lda #$01            ; the wind's first filter step on the first frame
@@ -478,7 +495,7 @@ tpN:
         sta wcut
         lda #$08            ; 8 frames of silent attack (tStart gates it with no waveform)
         sta wst
-        lda #${TUNEF & 255} ; the tune, tuneS seconds after the cut
+        lda #${TUNEF & 255} ; the clock after the tree: the tune, tuneS seconds after it is whole
         sta mdlo
         lda #${TUNEF >> 8}
         sta mdhi
@@ -630,8 +647,9 @@ fw:     lda $d012
         jsr tick
 fOne:   jsr dslv            ; the dissolve is per FRAME, with its own pace for each machine (tPrep)
         ; ---- FIRE: the end of the end. A PRESS, not a key held since before the scene ----
-${autoF ? `        lda ddone           ; ENDAUTO (a test): fire presses itself
-        beq kau9
+${autoF ? `        lda mdlo            ; ENDAUTO (a test): fire presses itself, autoF frames after the
+        ora mdhi            ;   clock after the tree runs out (past the first gust, which endcheck
+        bne kau9            ;   waits for; autoF is a byte, too short to count from the dissolve)
         dec kauto
         beq kgo
 kau9:
@@ -659,7 +677,7 @@ kdn:    jmp frame
 
 ; ---- tick: one 1/60 s of the sound, the wind in the leaves and the lights ----
 tick:   jsr snd             ; first, so the sound's tick is the same point of every frame
-${leafCode(fld, GRATE, GUSTW, GUSTH, calm)}
+${leafCode(fld, GRATE, GUSTW, GUSTH, calm, GATEF)}
         ; ---- lights: when a light's time is up it toggles, then picks its next wait ----
         ldx #${NL - 1}
 lt:     dec ltimer,x
@@ -733,7 +751,7 @@ dslv:   lda ddone
 dsr:    lda dsteps
         cmp dcap
         bcs dsg
-dsInc:  adc #$01            ; (carry clear) -- 1 on NTSC; 1, 2, 1, 2... on PAL
+dsInc:  adc #${CLIMB}            ; (carry clear) -- ${CLIMB} on NTSC; ${CLIMB}, ${CLIMB + 1}, ${CLIMB}... on PAL
         sta dsteps
         lda dsInc+1
         eor dTog
@@ -834,20 +852,6 @@ rnd:    lsr seedhi
 rnd1:   lda seedlo
         rts
 
-lfirst:
-${rows(lfirst)}
-lcount:
-${rows(lights.map(l => l.bytes.length))}
-lmode:
-${rows(lights.map(l => l.kind === 'steady' ? 0 : 1))}
-lonT:
-${rows(lights.map(l => l.onT))}
-loffT:
-${rows(lights.map(l => l.offT))}
-lpause:
-${rows(lights.map(l => l.pause))}
-lphase:
-${rows(lights.map(l => l.phase))}
 baddrlo:
 ${rows(flat.map(b => (SRC + b.o) & 255))}
 baddrhi:
@@ -872,7 +876,8 @@ ${rows(scene.bm)}
 ; press that got here skips nothing) blanks the screen again and goes to REBOOT.
 ; IT LIVES IN THE BITMAP'S TAIL, ${hx(SRC + 8000, 4)}-${hx(SRC_COL - 1, 4)}: SRC is 8000 bytes in a 32-page slot, and nothing
 ; reads or writes past its end (dslv skips the LFSR values past the picture; the leaves and lights
-; touch picture bytes only). The code page ($0800-$0fff) and IEND's $cc00 page are full.
+; touch picture bytes only). The code page ($0800-$0fff) and IEND's $cc00 page are full. The lights'
+; own tables follow it.
 lnote:  lda #$00            ; the screen's rows past the file's (code 0 is the blank cell): two
         tax                 ;   overlapping 256-byte stores, from the first such row and up to the 1000th
 ln0:    sta ${hx(NOTE_SCR + NOTE_ROWS * 40, 4)},x
@@ -905,6 +910,23 @@ ${autoF ? `        lda #${autoF & 255}         ; ENDAUTO (a test): if no press c
         sta $d011
         jmp ${hx(QL.reboot, 4)}   ; IEND's REBOOT
 lnEnd:
+; ---- each light's own table, a byte a light: read only. Here since 2026-11-19, when the vibrato's
+; 16-bit step left the code page one byte, and a test build (ENDAUTO) none ----
+lfirst:
+${rows(lfirst)}
+lcount:
+${rows(lights.map(l => l.bytes.length))}
+lmode:
+${rows(lights.map(l => l.kind === 'steady' ? 0 : 1))}
+lonT:
+${rows(lights.map(l => l.onT))}
+loffT:
+${rows(lights.map(l => l.offT))}
+lpause:
+${rows(lights.map(l => l.pause))}
+lphase:
+${rows(lights.map(l => l.phase))}
+tailEnd:
         * = ${hx(SRC_COL, 4)}
 ${rows(scene.col)}
         * = ${hx(SRC_SCR, 4)}
@@ -913,7 +935,7 @@ ${rows(scene.scr)}
   const ta = assemble(tsrc), TL = ta.labels;
   if (TL.tFl !== T_RUN + 6 || TL.tPal !== T_RUN + 7) throw new Error('ITRE: IEND writes tFl and tPal at T_RUN+6 and +7');
   if (TL.tCodeEnd > SITE) throw new Error(`ITRE's code and light tables run to ${hx(TL.tCodeEnd, 4)}, into the leaf sites at ${hx(SITE, 4)}`);
-  if (TL.lnEnd > SRC_COL) throw new Error(`ITRE's note runs to ${hx(TL.lnEnd, 4)}, into the colour data at ${hx(SRC_COL, 4)}`);
+  if (TL.tailEnd > SRC_COL) throw new Error(`ITRE's note and light tables run to ${hx(TL.tailEnd, 4)}, into the colour data at ${hx(SRC_COL, 4)}`);
   if (scene.bm.length !== 8000) throw new Error('the note sits right after an 8000-byte bitmap');
   // INOT: the glyphs, then the screen's first NOTE_ROWS rows. It loads over the tree's display (DSP),
   // never over anything the note or REBOOT still needs
@@ -941,7 +963,7 @@ ${rows(note.screen.slice(0, NOTE_ROWS * 40))}
 // (Calm was 2-4 s and lone turns one in 32 until the user's "a little more wind"; then 1.5-2.5 s and
 // GRATE 171 in a 4x3 window until 2026-11-10: now 1-2 s, 1.5 turns a frame, 5x4 -- see buildEnding.)
 // A turn picks a random site and keeps it only if it lies inside the gust -- up to 6 tries a frame.
-const leafCode = (fld, GRATE, GUSTW, GUSTH, CALM) => `
+const leafCode = (fld, GRATE, GUSTW, GUSTH, CALM, GATEF) => `
         inc fcount
         lda gact
         bne gmove
@@ -950,10 +972,15 @@ const leafCode = (fld, GRATE, GUSTW, GUSTH, CALM) => `
         bne gc1
         jsr pick
         jsr turn
-gc1:    lda ddone           ; NO GUST WHILE THE PICTURE DISSOLVES IN (the user, 2026-11-16): the calm's
-        beq gcw             ;   count waits, so the first gust comes a second after the dissolve ends.
-        dec gcalm           ;   A gust turning many leaves in the dissolve's full-speed end ran the
-        beq gnew            ;   frame over (endcheck counted 2-8 frames lost on NTSC, 0-16 on PAL)
+gc1:    lda ddone           ; NO GUST WHILE THE PICTURE DISSOLVES IN (the user, 2026-11-16): a gust
+        beq gcw             ;   turning many leaves in the dissolve's full-speed end ran the frame over
+        lda mdlo            ;   (endcheck counted 2-8 frames lost on NTSC, 0-16 on PAL). And none
+        cmp #${(GATEF + 1) & 255}            ;   until the clock after the tree has GATEF ticks left,
+        lda mdhi            ;   gustS after it (2026-11-19): clock - (GATEF+1), carry set = still more
+        sbc #${(GATEF + 1) >> 8}
+        bcs gcw
+        dec gcalm
+        beq gnew
 gcw:    jmp sdone
 gnew:   jsr rnd             ; ---- a new GUST: which way, how high, how fast ----
         and #$01
@@ -1573,8 +1600,9 @@ grn1:   lda grl
 //
 // THE TUNE, in the distance: the user's flute, as the trace of their GoatTracker instrument plays it
 // -- triangle, AD $11 / SR $38, a scoop down into each note (+3, +2 semitones, then the note), and
-// after 20 frames a vibrato of about a sixth of a semitone, 6 a second (a step of the frequency's high
-// byte / 2, turning every 5 frames). Between two notes the instrument's hard restart, as the tracker
+// after 20 frames a vibrato of about two fifths of a semitone, 3 a second (VIB_TURN and VIB_SWING in
+// end-tunes.mjs). Until 2026-11-19 it was a sixth of a semitone, 6 a second (the user: "a step
+// deeper", then "slow it a bit", then 3 a second at that depth). Between two notes the instrument's hard restart, as the tracker
 // does it: 2 frames out, ADSR 0 and the gate off; 1 frame out, the envelope back and the test bit; then
 // the gate. Before a rest the note just lets go, at release 8: it rings out into the space.
 // BREATH (voice 3): noise at sustain brSus, one fixed pitch, gated with the flute.
@@ -1623,16 +1651,18 @@ wrs:    clc
         asl
         ora #$01            ; voice 1 only
         sta $d417
-mel:    lda tFl             ; ---- the tune: only with the flute (the user, 2026-11-12: "if you didn't
-        bne mel0            ;   collect it, you just get the wind") ----
-        rts
-mel0:   lda mdlo            ; ---- the tune: not yet? ----
+mel:    lda ddone           ; ---- THE CLOCK AFTER THE TREE: stopped until it is whole, then down to
+        beq mrt             ;   the tune -- with or without the flute, as the first gust reads it ----
+        lda mdlo
         ora mdhi
-        beq mgo
+        beq mel0
         lda mdlo
         bne md1
         dec mdhi
 md1:    dec mdlo
+mrt:    rts
+mel0:   lda tFl             ; ---- the tune: only with the flute (the user, 2026-11-12: "if you didn't
+        bne mgo             ;   collect it, you just get the wind") ----
         rts
 mgo:    dec mdur
         bne mhr
@@ -1765,40 +1795,45 @@ mp1:    cpx #$02
         clc
         adc scoop,x
 mp4:    tay
-        cpx #$14            ; 20 frames in: the vibrato starts, up 2 steps first
-        bcc mpw
+        cpx #$14            ; 20 frames in: the vibrato starts, up half a run first, so it swings
+        bcc mpw             ;   evenly about the note (VIB_TURN / 2; it was 2 of 5, half a step flat)
         bne mv1
         lda #$01
         sta vdir
-        lda #$02
+        lda #${VIB_TURN >> 1}
         sta vcnt
-        jsr rnd             ; one vibrato in ${VIB_DEEP_IN} twice as deep (the tracker's depth 16 -> 32)
+        jsr rnd             ; one vibrato in ${VIB_DEEP_IN} twice as deep (the tracker's depth 32 -> 64)
         cmp #${Math.round(256 / VIB_DEEP_IN)}
         lda #$00
         rol
         sta vdeep           ; (0 = deep: the carry was clear)
-mv1:    lda fhi,y           ; a step: the frequency's high byte / 2, or / 1 deep
+mv1:    lda vstep,y         ; a frame's step (vstep, VIB_SWING / VIB_TURN of the frequency's high byte),
+        ldx #$00            ;   or twice it deep. 16-BIT, into mt: deep, the top C's is 80, and
+        stx mt+1            ;   was 134 (2026-11-19), past what a signed byte holds
         ldx vdeep
-        beq mv1d
-        lsr
-mv1d:   ldx vdir
+        bne mv1d            ; (0 = deep)
+        asl
+        rol mt+1
+mv1d:   sta mt
+        lda vdir
         bpl mv2
-        eor #$ff
+        lda #$00            ; down: the step negated
+        sec
+        sbc mt
+        sta mt
+        lda #$00
+        sbc mt+1
+        sta mt+1
+mv2:    lda voff            ; the offset + the step
         clc
-        adc #$01
-mv2:    ldx #$00            ; (signed: at most 67, the top C's)
-        cmp #$80
-        bcc mv3
-        dex
-mv3:    clc
-        adc voff
+        adc mt
         sta voff
-        txa
-        adc voffh
+        lda voffh
+        adc mt+1
         sta voffh
         dec vcnt
         bne mpw
-        lda #$05
+        lda #${VIB_TURN}            ; the rate: a turn every VIB_TURN frames (end-tunes.mjs)
         sta vcnt
         lda vdir
         eor #$fe            ; 1 <-> -1
@@ -1849,6 +1884,8 @@ flo:
 ${rows(freqs.map(f => f & 255))}
 fhi:
 ${rows(freqs.map(f => f >> 8))}
+vstep:  ; the vibrato's step a frame, a note each (VIB_SWING / VIB_TURN of its frequency's high byte)
+${rows(freqs.map(f => Math.round((f >> 8) * VIB_SWING / VIB_TURN)))}
 ${gen ? '' : `enote:
 ${rows(ev.map(e => e[0]))}
 edur:

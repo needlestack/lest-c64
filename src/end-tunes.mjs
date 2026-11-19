@@ -112,8 +112,16 @@ export const GEN_GLIDE_IN = 10, GEN_BEND_IN = 6, GEN_BEND_MIN = 4;
 export const GEN_SLUR = [0, 3 / 4, 1 / 2, 1 / 5];
 export const GEN_SLUR_RUN = 5;
 // the vibrato: one note in VIB_DEEP_IN gets it twice as deep (the user: "bump the vibrato up one step
-// (16 to 32, I think?) sometimes"); a step is the frequency's high byte instead of half of it.
+// (16 to 32, I think?) sometimes"); a step is twice the usual. Both a step deeper since 2026-11-19
+// ("increase the depth of the vibrato by a step"): the usual is the frequency's high byte (was half
+// of it), the deep one twice it (was the high byte).
 export const VIB_DEEP_IN = 4;
+// the vibrato's RATE and DEPTH, separately: it turns every VIB_TURN frames (a triangle of 2 *
+// VIB_TURN frames), and each swing, peak to peak, is VIB_SWING times the note's frequency high byte
+// (twice that deep) -- so it moves VIB_SWING / VIB_TURN of that a frame, from a table (vstep).
+// 2026-11-19, the user: a step deeper, then slower, then "go for 3 hz - leave depth as it is": 10
+// frames, 3 a second, swinging 6 (it was 5 frames, 6 a second, swinging 2.5).
+export const VIB_TURN = 10, VIB_SWING = 6;
 
 // the SID's frequency word for a semitone, A4 = 440 Hz, on the NTSC clock (the game's tuning)
 export const sidFreq = semi => Math.round(440 * 2 ** ((semi - 57) / 12) * 16777216 / 1022727);

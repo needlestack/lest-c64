@@ -102,16 +102,18 @@ export const launch = (args, opts = {}) => {
   }
   const out = opts.log ? openSync(opts.log, 'w') : 'ignore';
   const proc = spawn(X64, [...cfgArgs, ...args], { stdio: ['ignore', out, out], detached: true });
-  let dead = false;
+  let dead = false, cap = null;
   const kill = () => {
     if (dead) return; dead = true; live.delete(kill);
+    if (cap) clearTimeout(cap);   // THIS run's cap only: left armed, it killed the next run and the whole
+                                  // tool (endcheck, 2026-11-19: run 1's 90 s cap fired inside run 2)
     try { process.kill(-proc.pid, 'SIGKILL'); } catch {}     // the WHOLE group: wrapper and emulator
   };
   live.add(kill);
   proc.on('exit', () => { /* the wrapper exited; the group may not have -- kill() still sweeps it */ });
   if (opts.hardCapMs) {
-    const t = setTimeout(() => { console.error(`HARD CAP${opts.label ? ' (' + opts.label + ')' : ''}: killed after ${opts.hardCapMs / 1000}s`); kill(); process.exit(3); }, opts.hardCapMs);
-    t.unref?.();
+    cap = setTimeout(() => { console.error(`HARD CAP${opts.label ? ' (' + opts.label + ')' : ''}: killed after ${opts.hardCapMs / 1000}s`); kill(); process.exit(3); }, opts.hardCapMs);
+    cap.unref?.();
   }
   return { pid: proc.pid, proc, kill };
 };

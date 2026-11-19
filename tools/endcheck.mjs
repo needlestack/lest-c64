@@ -16,7 +16,7 @@
 //
 // and in every run: the tree's sound/leaves/lights ticks per frame through the whole dissolve (1 on
 // NTSC, 6/5 on PAL), that no frame is lost and no gust starts while it runs, that the first gust
-// comes about a second after it (2026-11-16: gusts wait for the dissolve), THE NOTE after the tree
+// comes 5 s after it and the flute's clock runs out 8 s after it (2026-11-19), THE NOTE after the tree
 // (2026-11-17: the level select revealed; disk runs: a press held from the tree leaves it up, cart
 // runs: a fresh one takes it down), and REBOOT reaching the game's entry with palF what the machine is (the reload used to zero it).
 // Every number is checked; exit 1 if any fails. About a minute and a half.
@@ -31,7 +31,7 @@ const asmPath = join(ROOT, 'build/iray.asm');
 const asmKeep = existsSync(asmPath) ? readFileSync(asmPath) : null;
 let R, Q, T, cartHold;
 try {
-  R = buildDisk(`${process.argv[2] ?? ''} ENDTEST=1 FALLNOW=64 ENDAUTO=120`, D64).syms;   // fire 2 s after the dissolve: past the first gust
+  R = buildDisk(`${process.argv[2] ?? ''} ENDTEST=1 FALLNOW=64 ENDAUTO=120`, D64).syms;   // fire 2 s after the flute's clock runs out (10 s after the tree): past the first gust
   Q = JSON.parse(readFileSync(join(ROOT, 'build/end.syms.json'), 'utf8'));
   T = JSON.parse(readFileSync(join(ROOT, 'build/itre.syms.json'), 'utf8'));
   cartHold = (await import('../src/cart-src.mjs')).CART_END_HOLD_S;
@@ -99,10 +99,16 @@ async function run(medium, machine, test, n) {
     // count starts and ends at dslv, not on a frame boundary.)
     const lost = cyc / C.frame - frames;
     check(lost < 0.5, `dissolve took ${(cyc / C.hz).toFixed(2)} s = ${(cyc / C.frame).toFixed(1)} frames: none lost`);
-    // ...and the first gust a second (60 ticks) after it -- gcalm's start, which waited
-    let after = 0;
-    while (after < 200) { const p = m.pcOf(await m.cmd('x')); if (p === T.gnew) break; if (p === T.tick) after++; }
-    check(after >= 55 && after <= 65, `the first gust came ${after} ticks after the dissolve (wants ~60)`);
+    // ...then THE CLOCK AFTER THE TREE (2026-11-19): the first gust 5 s (300 ticks) after it, and the
+    // clock out -- the flute's start, mel0, which the clock reaches only at 0 -- 8 s (480 ticks) after it
+    await m.cmd(`break ${h(T.mel0)}`);
+    let after = 0, gustAt = -1;
+    while (after < 600) { const p = m.pcOf(await m.cmd('x'));
+      if (p === T.gnew && gustAt < 0) gustAt = after;
+      if (p === T.mel0) break;
+      if (p === T.tick) after++; }
+    check(gustAt >= 298 && gustAt <= 302, `the first gust came ${gustAt} ticks after the dissolve (wants 300)`);
+    check(after >= 478 && after <= 482, `the flute's clock ran out ${after} ticks after the dissolve (wants 480)`);
     // ENDAUTO presses fire: THE NOTE (the level select revealed) comes up. A press held from the tree
     // must not dismiss it -- ENDAUTO then lets it go after its own 120 frames -- and a fresh one must,
     // at once. Then REBOOT reloads the game and starts it.

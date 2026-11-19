@@ -30310,18 +30310,19 @@ try {
     palF: r.labels.palF,   // REBOOT restores it: IMG's reload resets it to 0
     flute: HAS_FLUTE ? r.labels.fluteGot : null,   // the ending plays its tune only if the flute was taken
     // the ending's sound and wind (2026-11-10): ENDTUNE = gen (the generative flute, default) or a fixed tune's name in src/end-tunes.mjs, ENDTUNE_S =
-    // seconds after the cut before it plays, ENDBREATH = the breath's noise pitch (hex high byte, 0 =
+    // seconds after the tree is whole (the dissolve done) before it plays, ENDGUST_S the same for the first gust, ENDBREATH = the breath's noise pitch (hex high byte, 0 =
     // none) and ENDBRSUS its sustain; ENDGRATE = leaf turns a frame in a gust (256ths), ENDGUST = the
     // gust window's half-width,half-height (cells), ENDCALM = the shortest calm (frames); ENDRAMP =
-    // frames at the base pace,pixels a frame at the end
-    tune: (t => t === 'gen' ? t : parseTune(t))(process.env.ENDTUNE ?? 'gen'), tuneS: +(process.env.ENDTUNE_S ?? 20),
+    // frames at the base pace,pixels a frame at the end,pixels a frame more each frame
+    tune: (t => t === 'gen' ? t : parseTune(t))(process.env.ENDTUNE ?? 'gen'), tuneS: +(process.env.ENDTUNE_S ?? 8),   // the user, 2026-11-19: gusts 5 s after the tree, the flute 3 s after them
+    gustS: +(process.env.ENDGUST_S ?? 5),
     breath: parseInt(process.env.ENDBREATH ?? '38', 16), brSus: +(process.env.ENDBRSUS ?? 1),
     grate: +(process.env.ENDGRATE ?? 384), gust: (process.env.ENDGUST ?? '5,4').split(',').map(Number),
     calm: +(process.env.ENDCALM ?? 60),
     // ENDGENNOW=1 (a TEST): the generative flute skips the user's two opening phrases; ENDGAP=base,mult:
     // its long silences are base + mult * 0..255 frames (default 300,4: 5-22 s)
     genOpts: { now: !!process.env.ENDGENNOW, gap: (process.env.ENDGAP ?? '300,4').split(',').map(Number) },
-    ramp: (([at, cap]) => ({ at, cap }))((process.env.ENDRAMP ?? '240,120').split(',').map(Number)) } : null;
+    ramp: (([at, cap, climb]) => ({ at, cap, climb }))((process.env.ENDRAMP ?? '30,119,2').split(',').map(Number)) } : null;
   const END = END_OPTS ? buildEnding(END_OPTS) : null;
   if (END) {
     writeFileSync('./build/end.syms.json', JSON.stringify(END.iend.labels));   // IEND's labels, for a monitor session
